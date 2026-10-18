@@ -4,22 +4,22 @@ from pathlib import Path
 from .masking import MaskingFilter
 
 def setup_logger(log_dir: Path):
-    """配置并初始化日志系统，自动集成敏感凭据脱敏过滤器"""
+    """Configure and initialize logging system, integrating credential masking filter."""
     log_file_path = log_dir / "automation.log"
     log_file_path.parent.mkdir(exist_ok=True)
 
-    # 创建一个根日志记录器
+    # Root logger initialization
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    # 避免重复添加处理器
+    # Avoid duplicate handlers
     if not logger.handlers:
         masking_filter = MaskingFilter()
 
-        # 创建文件处理器，支持日志文件滚动
+        # Rotating file handler (10MB, up to 5 backups)
         file_handler = RotatingFileHandler(
             log_file_path,
-            maxBytes=10 * 1024 * 1024,  # 10 MB
+            maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding='utf-8'
         )
@@ -29,7 +29,7 @@ def setup_logger(log_dir: Path):
         file_handler.addFilter(masking_filter)
         logger.addHandler(file_handler)
 
-        # 创建控制台处理器
+        # Console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         console_formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')

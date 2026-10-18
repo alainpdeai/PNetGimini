@@ -479,15 +479,42 @@ graph TD
 
 ## 7. Implementation & Traceability Roadmap
 
-> **Document Version Note**: This specification (v1.3.0) covers the PNetGimini v3.1–v4.0 roadmap aligned with Alain Degreffe's technical review and P0 contract consistency resolutions. All modules marked DELIVERED are fully implemented, unit-tested, and available in the project repository (verified by 58 passing unit tests).
+> **Document Version Note**: This specification (v1.3.0) covers the PNetGimini v3.1–v4.0 roadmap aligned with Alain Degreffe's technical review, P0 contract consistency resolutions, and Phase 4 convergence/diff rollback enhancements. All modules marked DELIVERED are fully implemented, verified by automated unit test suites (execution metrics tracked in [`CHANGELOG.md`](file:///D:/OneDrive/2025/Alain/pythonprogram/PnetGimini/CHANGELOG.md)), and gated by TraceGraph architectural safety enforcement.
 
 | Release | Focus Area | EVE IaC API Contract | Architecture Deliverables | Status |
 | :---: | :--- | :--- | :--- | :---: |
 | **v3.1** | **Enterprise Security & Desensitization** | `LoginRequest`, Token Injection | `MaskingFilter` credential redaction, `${VAR:-default}` env expansion, SSH key auth | **DELIVERED ✅** |
 | **v3.2** | **OOB Overlay & Topology Discovery** | `oob start`, `inventory generate`, `wait_console` (diagnostic: `list_project_consoles`) | `EveIacConnector` plugin, deterministic `automation_profile` driver mapping, intent binding | **DELIVERED ✅** |
-| **v3.3** | **Declarative Health Gate & Chaos Testing** | `set_link_suspend`, `apply_link_quality` | `HealthGateEngine`, `ChaosOrchestrator` (`link_fault_context` & reset sweeps), OSPF/BGP/Ping assertions | **DELIVERED ✅** |
+| **v3.3** | **Declarative Health Gate & Chaos Testing** | `set_link_suspend`, `apply_link_quality` | `HealthGateEngine`, `ChaosOrchestrator` (`link_fault_context` & reset sweeps), OSPF/BGP/Ping assertions, convergence polling | **DELIVERED ✅** |
 | **v3.5** | **Dual-Tier Self-Healing Escalation** | `reconcile_project`, Node Lifecycle | Fallback escalation from CLI diff rollback (Tier 1) to node wipe/reset and lab-wide reconciliation (Tier 2) | **PLANNED ⏳** |
 | **v4.0** | **Complete GitOps Digital Twin Pipeline** | Full REST/SDK OpenAPI Lifecycle | GitHub Actions / GitLab CI standardized workflow templates | **PLANNED ⏳** |
+
+---
+
+## 8. Acceptance Criteria & Compliance Verification
+
+To ensure that implementations can be audited and verified independently, PNetGimini establishes the following mandatory acceptance criteria:
+
+1. **AC-1: Zero Non-English Artifacts in Core Code and Documentation**:
+   * All documentation under `docs/` and all Python source code under `src/` must contain zero Chinese characters (comments, docstrings, variable names, or log strings), maintaining 100% compliance with international open-source engineering standards.
+
+2. **AC-2: Declarative Schema Validation**:
+   * All operational intent documents must validate against the Pydantic v2 `OperationalIntent` model (`apiVersion: pnetgimini/v1alpha1`, `kind: OperationalIntent`) and match [`docs/schemas/operational_intent_schema.json`](file:///D:/OneDrive/2025/Alain/pythonprogram/PnetGimini/docs/schemas/operational_intent_schema.json).
+
+3. **AC-3: Surgical Attribute-Level Diff Reversal**:
+   * When an interface attribute (such as `ip ospf cost`, `bandwidth`, `mtu`, `description`) is modified from a baseline value, `ConfigDiffEngine` must compute a rollback patch that re-applies the original baseline attribute value rather than blindly prepending `no` or `undo`.
+
+4. **AC-4: Routing Convergence Polling Semantics**:
+   * OSPF neighbor/metric assertions and BGP session/prefix assertions must support declarative polling loops (`polling_interval_seconds`, `timeout_seconds`). The engine must retry non-blocking probes until convergence is achieved or the deadline expires, preventing false-positive rollbacks during transient convergence states.
+
+5. **AC-5: Guaranteed Environmental Restoration**:
+   * All environmental fault injections must be executed inside `ChaosOrchestrator.link_fault_context` with guaranteed `try ... finally` link un-suspension. On engine startup, `ChaosOrchestrator.reset_all_lab_impairments()` must sweep the target lab and clear any residual impairments.
+
+6. **AC-6: Deterministic Link Resolution**:
+   * Endpoint expressions (`"Spine-01:e0/1 <-> Leaf-01:e0/1"`) must resolve unambiguously to stable IaC identifiers. Unresolvable or ambiguous expressions must immediately raise `ValueError` without heuristic guessing.
+
+7. **AC-7: Continuous Architecture Gating**:
+   * Every code modification must pass TraceGraph MCP pre-flight risk checks, cycle detection, and automated test execution with zero regressions.
 
 ---
 

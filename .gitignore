@@ -51,6 +51,7 @@ word.py
 config_to_yamlv1.py
 src/core/device_managerV2.0.py
 src/core/device_managerv1.py
+archive/
 tree.txt
 
 # Configs directory - exclude all except specific files

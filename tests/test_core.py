@@ -103,6 +103,42 @@ class TestDiffRollback(unittest.TestCase):
         ]
         self.assertEqual(plan, expected)
 
+    def test_cisco_diff_reversal_attribute_restore(self):
+        baseline = "interface GigabitEthernet0/1\n ip ospf cost 10\n description Uplink-Primary"
+        deployed = [
+            "interface GigabitEthernet0/1",
+            "ip ospf cost 50",
+            "bandwidth 1000000",
+            "description Uplink-Modified"
+        ]
+        plan = ConfigDiffEngine.compute_reversion_plan(baseline, deployed, self.cisco_adapter)
+        expected = [
+            "interface GigabitEthernet0/1",
+            "ip ospf cost 10",
+            "no bandwidth",
+            "description Uplink-Primary",
+            "exit"
+        ]
+        self.assertEqual(plan, expected)
+
+    def test_huawei_diff_reversal_attribute_restore(self):
+        baseline = "interface GigabitEthernet0/0/1\n ospf cost 20\n description Core-Link"
+        deployed = [
+            "interface GigabitEthernet0/0/1",
+            "ospf cost 100",
+            "mtu 9000",
+            "description Backup-Link"
+        ]
+        plan = ConfigDiffEngine.compute_reversion_plan(baseline, deployed, self.huawei_adapter)
+        expected = [
+            "interface GigabitEthernet0/0/1",
+            "ospf cost 20",
+            "undo mtu",
+            "description Core-Link",
+            "quit"
+        ]
+        self.assertEqual(plan, expected)
+
 class TestAsyncEngine(unittest.TestCase):
     def test_async_engine_execution(self):
         devices = [

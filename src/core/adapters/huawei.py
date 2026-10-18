@@ -9,7 +9,7 @@ class HuaweiAdapter(BaseAdapter):
 
     BLOCK_PATTERNS = (
         r"^interface\s+\S+",
-        r"^ospf\s*\d*",
+        r"^ospf(\s+\d+)?(\s+(router-id|vpn-instance)\s+\S+)?$",
         r"^bgp\s+\d+",
         r"^vlan\s+\d+",
         r"^acl\s+\S+",
@@ -86,18 +86,34 @@ class HuaweiAdapter(BaseAdapter):
                 reversal_cmds.append("undo shutdown")
             elif child_str.lower().startswith("undo "):
                 reversal_cmds.append(child_str[5:].strip())
-            elif child_str.lower().startswith("ip address "):
-                baseline_ip = None
-                for b in baseline_set:
-                    if b.lower().startswith("ip address "):
-                        baseline_ip = b
-                        break
-                if baseline_ip:
-                    reversal_cmds.append(baseline_ip)
-                else:
-                    reversal_cmds.append("undo ip address")
             else:
-                reversal_cmds.append(f"undo {child_str}")
+                # Check if this child modifies an existing baseline attribute with a known prefix
+                overridden_prefixes = (
+                    "ip address ", "ospf cost ", "description ", "mtu ", "bandwidth ",
+                    "ospf timer hello ", "ospf timer dead "
+                )
+                matched_prefix = None
+                for pfx in overridden_prefixes:
+                    if child_str.lower().startswith(pfx):
+                        matched_prefix = pfx
+                        break
+
+                if matched_prefix:
+                    baseline_val = None
+                    for b in baseline_set:
+                        if b.lower().startswith(matched_prefix):
+                            baseline_val = b
+                            break
+                    if baseline_val:
+                        reversal_cmds.append(baseline_val)
+                    else:
+                        if matched_prefix == "ip address ":
+                            reversal_cmds.append("undo ip address")
+                        else:
+                            attr_key = matched_prefix.strip()
+                            reversal_cmds.append(f"undo {attr_key}")
+                else:
+                    reversal_cmds.append(f"undo {child_str}")
 
         reversal_cmds.append(self.get_block_exit_command())
         return reversal_cmds

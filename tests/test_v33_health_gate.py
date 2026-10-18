@@ -124,6 +124,51 @@ class TestHealthGateEngine(unittest.TestCase):
             self.engine.verify_device(mock_net, spec)
         self.assertIn("state '2-WAY' did not match expected 'FULL'", str(ctx.exception.failures))
 
+    def test_verify_ospf_convergence_retry(self):
+        mock_net = MagicMock()
+        # First call: neighbor in 2-WAY; Second call: neighbor converged to FULL
+        mock_net.send_command.side_effect = [
+            "Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+            "1.1.1.1           1   2-WAY/DROTHER   00:00:34    10.1.1.2        GigabitEthernet0/1\n",
+            "Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+            "1.1.1.1           1   FULL/BDR        00:00:34    10.1.1.2        GigabitEthernet0/1\n",
+        ]
+        spec = {
+            "ospf": [
+                {
+                    "neighbor_ip": "10.1.1.2",
+                    "expected_state": "FULL",
+                    "timeout_seconds": 2.0,
+                    "polling_interval_seconds": 0.01,
+                }
+            ]
+        }
+        res = self.engine.verify_device(mock_net, spec)
+        self.assertTrue(res["passed"])
+        self.assertEqual(res["passed_assertions"], 1)
+        self.assertEqual(mock_net.send_command.call_count, 2)
+
+    def test_verify_ospf_convergence_timeout(self):
+        mock_net = MagicMock()
+        mock_net.send_command.return_value = (
+            "Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+            "1.1.1.1           1   INIT/DROTHER    00:00:34    10.1.1.2        GigabitEthernet0/1\n"
+        )
+        spec = {
+            "ospf": [
+                {
+                    "neighbor_ip": "10.1.1.2",
+                    "expected_state": "FULL",
+                    "timeout_seconds": 0.05,
+                    "polling_interval_seconds": 0.01,
+                }
+            ]
+        }
+        with self.assertRaises(HealthGateError) as ctx:
+            self.engine.verify_device(mock_net, spec)
+        self.assertIn("state 'INIT' did not match expected 'FULL'", str(ctx.exception.failures))
+        self.assertGreaterEqual(mock_net.send_command.call_count, 2)
+
     def test_verify_bgp_established_and_prefixes(self):
         mock_net = MagicMock()
         mock_net.send_command.return_value = (
@@ -138,6 +183,31 @@ class TestHealthGateEngine(unittest.TestCase):
         res = self.engine.verify_device(mock_net, spec)
         self.assertTrue(res["passed"])
         self.assertEqual(res["passed_assertions"], 1)
+
+    def test_verify_bgp_convergence_retry(self):
+        mock_net = MagicMock()
+        # First call: BGP session Active; Second call: Established with 12 prefixes
+        mock_net.send_command.side_effect = [
+            "Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd\n"
+            "192.168.100.2   4        65002       0       0        0    0    0 never    Active\n",
+            "Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd\n"
+            "192.168.100.2   4        65002     120     125        5    0    0 00:01:10       12\n",
+        ]
+        spec = {
+            "bgp": [
+                {
+                    "peer_ip": "192.168.100.2",
+                    "expected_state": "Established",
+                    "min_prefixes_received": 10,
+                    "timeout_seconds": 2.0,
+                    "polling_interval_seconds": 0.01,
+                }
+            ]
+        }
+        res = self.engine.verify_device(mock_net, spec)
+        self.assertTrue(res["passed"])
+        self.assertEqual(res["passed_assertions"], 1)
+        self.assertEqual(mock_net.send_command.call_count, 2)
 
     def test_verify_bgp_idle_failure(self):
         mock_net = MagicMock()

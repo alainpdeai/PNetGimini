@@ -9,6 +9,7 @@ Provides multi-vendor structured telemetry assertions for network operational va
 """
 
 import re
+import time
 import logging
 from typing import Dict, Any, List, Optional, Union
 
@@ -183,32 +184,24 @@ class HealthGateEngine:
     # --------------------------------------------------------------------------
     # OSPF State & Metric Assertions
     # --------------------------------------------------------------------------
-    def _verify_ospf(self, net_connect, ospf_specs: List[Dict[str, Any]], results: Dict[str, Any]):
-        output_neighbor = None
-        output_route = None
+    def _evaluate_ospf_spec(self, spec: Dict[str, Any], output_neighbor: Optional[str], output_route: Optional[str]) -> tuple:
+        """Evaluate a single OSPF specification against live show command output."""
+        detail = {"type": "ospf", "spec": spec}
+        reasons = []
+        neighbor_ip = spec.get("neighbor_ip")
+        expected_state = spec.get("expected_state", "FULL").upper()
+        min_neighbors = spec.get("min_total_neighbors")
+        route = spec.get("route")
+        expected_metric = spec.get("expected_metric")
 
-        for spec in ospf_specs:
-            results["total_assertions"] += 1
-            neighbor_ip = spec.get("neighbor_ip")
-            expected_state = spec.get("expected_state", "FULL").upper()
-            min_neighbors = spec.get("min_total_neighbors")
-            route = spec.get("route")
-            expected_metric = spec.get("expected_metric")
-
-            if (neighbor_ip or min_neighbors is not None) and output_neighbor is None:
-                output_neighbor = net_connect.send_command("show ip ospf neighbor")
-
-            detail = {"type": "ospf", "spec": spec}
-            failed = False
-            reasons = []
-
-            # 1. Verify neighbor state
-            if neighbor_ip and output_neighbor:
-                # Find line with neighbor IP
+        # 1. Verify neighbor state
+        if neighbor_ip:
+            if not output_neighbor:
+                reasons.append(f"OSPF neighbor {neighbor_ip} not found in adjacency table.")
+            else:
                 found_state = None
                 for line in output_neighbor.splitlines():
                     if neighbor_ip in line:
-                        # Cisco line: 1.1.1.1 1 FULL/BDR 00:00:34 10.1.1.2 GigabitEthernet0/1
                         parts = line.split()
                         for p in parts:
                             if any(p.startswith(s) for s in ["FULL", "2-WAY", "EXSTART", "EXCHANGE", "INIT", "ATTEMPT", "DOWN"]):
@@ -217,36 +210,75 @@ class HealthGateEngine:
                         break
 
                 if not found_state:
-                    failed = True
                     reasons.append(f"OSPF neighbor {neighbor_ip} not found in adjacency table.")
                 elif found_state != expected_state:
-                    failed = True
                     reasons.append(f"OSPF neighbor {neighbor_ip} state '{found_state}' did not match expected '{expected_state}'.")
                 detail["found_state"] = found_state
 
-            # 2. Verify min_total_neighbors
-            if min_neighbors is not None and output_neighbor:
+        # 2. Verify min_total_neighbors
+        if min_neighbors is not None:
+            if not output_neighbor:
+                reasons.append(f"Total FULL OSPF neighbors below required minimum ({min_neighbors}).")
+            else:
                 full_count = output_neighbor.upper().count("FULL")
                 detail["full_neighbor_count"] = full_count
                 if full_count < min_neighbors:
-                    failed = True
                     reasons.append(f"Total FULL OSPF neighbors ({full_count}) below required minimum ({min_neighbors}).")
 
-            # 3. Verify route cost metric
-            if route and expected_metric is not None:
-                if output_route is None:
-                    output_route = net_connect.send_command(f"show ip route {route}")
-                # Cisco line: [110/20] via 10.1.1.2
+        # 3. Verify route cost metric
+        if route and expected_metric is not None:
+            if not output_route:
+                reasons.append(f"OSPF route {route} not found or metric unobtainable.")
+            else:
                 metric_match = re.search(r"\[\d+/(\d+)\]", output_route)
                 if metric_match:
                     found_metric = int(metric_match.group(1))
                     detail["found_metric"] = found_metric
                     if found_metric != expected_metric:
-                        failed = True
                         reasons.append(f"OSPF route {route} metric {found_metric} != expected {expected_metric}.")
                 else:
-                    failed = True
                     reasons.append(f"OSPF route {route} not found or metric unobtainable.")
+
+        return detail, reasons
+
+    def _verify_ospf(self, net_connect, ospf_specs: List[Dict[str, Any]], results: Dict[str, Any]):
+        output_neighbor = None
+        output_route = None
+
+        for spec in ospf_specs:
+            results["total_assertions"] += 1
+            neighbor_ip = spec.get("neighbor_ip")
+            min_neighbors = spec.get("min_total_neighbors")
+            route = spec.get("route")
+            expected_metric = spec.get("expected_metric")
+            timeout_seconds = spec.get("timeout_seconds", 0)
+            polling_interval = spec.get("polling_interval_seconds", 2.0)
+
+            if timeout_seconds and timeout_seconds > 0:
+                self.logger.info(f"[HealthGate] Polling OSPF convergence (timeout={timeout_seconds}s, interval={polling_interval}s)...")
+                deadline = time.time() + timeout_seconds
+                while True:
+                    if neighbor_ip or min_neighbors is not None:
+                        output_neighbor = net_connect.send_command("show ip ospf neighbor")
+                    if route and expected_metric is not None:
+                        output_route = net_connect.send_command(f"show ip route {route}")
+
+                    detail, reasons = self._evaluate_ospf_spec(spec, output_neighbor, output_route)
+                    if not reasons:
+                        failed = False
+                        break
+                    if time.time() >= deadline:
+                        failed = True
+                        break
+                    time.sleep(polling_interval)
+            else:
+                if (neighbor_ip or min_neighbors is not None) and output_neighbor is None:
+                    output_neighbor = net_connect.send_command("show ip ospf neighbor")
+                if route and expected_metric is not None and output_route is None:
+                    output_route = net_connect.send_command(f"show ip route {route}")
+
+                detail, reasons = self._evaluate_ospf_spec(spec, output_neighbor, output_route)
+                failed = bool(reasons)
 
             if failed:
                 results["passed"] = False
@@ -263,52 +295,72 @@ class HealthGateEngine:
     # --------------------------------------------------------------------------
     # BGP Summary & Prefix Floor Assertions
     # --------------------------------------------------------------------------
+    def _evaluate_bgp_spec(self, spec: Dict[str, Any], output_bgp: Optional[str]) -> tuple:
+        """Evaluate a single BGP specification against live show ip bgp summary output."""
+        peer_ip = spec.get("peer_ip")
+        expected_state = spec.get("expected_state", "Established")
+        min_prefixes = spec.get("min_prefixes_received", 0)
+        detail = {"type": "bgp", "peer_ip": peer_ip}
+        reasons = []
+
+        if not output_bgp:
+            reasons.append(f"BGP peer {peer_ip} not found in summary table.")
+            return detail, reasons
+
+        peer_line = None
+        for line in output_bgp.splitlines():
+            if peer_ip and peer_ip in line:
+                peer_line = line.strip()
+                break
+
+        if not peer_line:
+            reasons.append(f"BGP peer {peer_ip} not found in summary table.")
+        else:
+            tokens = peer_line.split()
+            last_token = tokens[-1]
+            if last_token.isdigit():
+                actual_state = "Established"
+                pfx_count = int(last_token)
+            else:
+                actual_state = last_token  # e.g., "Active", "Idle", "Connect"
+                pfx_count = 0
+
+            detail["actual_state"] = actual_state
+            detail["prefixes_received"] = pfx_count
+
+            if expected_state == "Established" and actual_state != "Established":
+                reasons.append(f"BGP peer {peer_ip} state is '{actual_state}' (expected Established).")
+
+            if min_prefixes > 0 and pfx_count < min_prefixes:
+                reasons.append(f"BGP peer {peer_ip} received prefixes ({pfx_count}) < floor threshold ({min_prefixes}).")
+
+        return detail, reasons
+
     def _verify_bgp(self, net_connect, bgp_specs: List[Dict[str, Any]], results: Dict[str, Any]):
         output_bgp = None
         for spec in bgp_specs:
             results["total_assertions"] += 1
-            peer_ip = spec.get("peer_ip")
-            expected_state = spec.get("expected_state", "Established")
-            min_prefixes = spec.get("min_prefixes_received", 0)
+            timeout_seconds = spec.get("timeout_seconds", 0)
+            polling_interval = spec.get("polling_interval_seconds", 2.0)
 
-            if output_bgp is None:
-                output_bgp = net_connect.send_command("show ip bgp summary")
-
-            detail = {"type": "bgp", "peer_ip": peer_ip}
-            failed = False
-            reasons = []
-
-            # Search peer line
-            peer_line = None
-            for line in output_bgp.splitlines():
-                if peer_ip and peer_ip in line:
-                    peer_line = line.strip()
-                    break
-
-            if not peer_line:
-                failed = True
-                reasons.append(f"BGP peer {peer_ip} not found in summary table.")
+            if timeout_seconds and timeout_seconds > 0:
+                self.logger.info(f"[HealthGate] Polling BGP convergence (timeout={timeout_seconds}s, interval={polling_interval}s)...")
+                deadline = time.time() + timeout_seconds
+                while True:
+                    output_bgp = net_connect.send_command("show ip bgp summary")
+                    detail, reasons = self._evaluate_bgp_spec(spec, output_bgp)
+                    if not reasons:
+                        failed = False
+                        break
+                    if time.time() >= deadline:
+                        failed = True
+                        break
+                    time.sleep(polling_interval)
             else:
-                # Last column is State or PfxRcd (if integer -> Established)
-                tokens = peer_line.split()
-                last_token = tokens[-1]
-                if last_token.isdigit():
-                    actual_state = "Established"
-                    pfx_count = int(last_token)
-                else:
-                    actual_state = last_token  # e.g., "Active", "Idle", "Connect"
-                    pfx_count = 0
-
-                detail["actual_state"] = actual_state
-                detail["prefixes_received"] = pfx_count
-
-                if expected_state == "Established" and actual_state != "Established":
-                    failed = True
-                    reasons.append(f"BGP peer {peer_ip} state is '{actual_state}' (expected Established).")
-
-                if min_prefixes > 0 and pfx_count < min_prefixes:
-                    failed = True
-                    reasons.append(f"BGP peer {peer_ip} received prefixes ({pfx_count}) < floor threshold ({min_prefixes}).")
+                if output_bgp is None:
+                    output_bgp = net_connect.send_command("show ip bgp summary")
+                detail, reasons = self._evaluate_bgp_spec(spec, output_bgp)
+                failed = bool(reasons)
 
             if failed:
                 results["passed"] = False

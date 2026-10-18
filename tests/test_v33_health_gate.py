@@ -273,6 +273,61 @@ class TestChaosOrchestrator(unittest.TestCase):
         self.assertTrue(suite_res[0]["passed"])
         self.assertTrue(suite_res[1]["passed"])
 
+    def test_link_fault_context_guarantees_restoration_on_exception(self):
+        with patch.object(self.connector, "set_link_suspend", wraps=self.connector.set_link_suspend) as mock_suspend:
+            try:
+                with self.orchestrator.link_fault_context("lab_dc.unl", "link_12"):
+                    mock_suspend.assert_called_with("lab_dc.unl", "link_12", suspended=True)
+                    raise RuntimeError("Simulated probe process crash")
+            except RuntimeError as e:
+                self.assertIn("Simulated probe", str(e))
+
+            # Verify finally block restored the link
+            mock_suspend.assert_called_with("lab_dc.unl", "link_12", suspended=False)
+
+    def test_reset_all_lab_impairments(self):
+        with patch.object(self.connector, "set_link_suspend") as mock_suspend, \
+             patch.object(self.connector, "apply_link_quality") as mock_quality:
+            cleaned = self.orchestrator.reset_all_lab_impairments("lab_dc.unl")
+            self.assertGreaterEqual(cleaned, 1)
+            mock_suspend.assert_called_with("lab_dc.unl", "link_12", suspended=False)
+            mock_quality.assert_called_with("lab_dc.unl", "link_12", delay_ms=0, jitter_ms=0, loss_pct=0.0)
+
+    def test_unresolvable_target_link_raises_error(self):
+        with self.assertRaises(ValueError):
+            self.orchestrator.resolve_link_id("lab_dc.unl", "NonExistent-01:e0/1 <-> NonExistent-02:e0/1")
+
+
+class TestNodeStateMachine(unittest.TestCase):
+    """Test suite for Phase 2 node lifecycle state machine."""
+
+    def test_valid_transitions(self):
+        from src.models.state import NodeStateMachine, NodeState
+        sm = NodeStateMachine("n_1")
+        self.assertEqual(sm.current_state, NodeState.ALLOCATED)
+
+        sm.transition_to(NodeState.BOOTING)
+        sm.transition_to(NodeState.CONSOLE_READY)
+        sm.transition_to(NodeState.OOB_READY)
+        sm.transition_to(NodeState.CONFIGURABLE)
+        sm.transition_to(NodeState.VERIFIED)
+        sm.transition_to(NodeState.CONVERGED)
+        self.assertEqual(sm.current_state, NodeState.CONVERGED)
+
+    def test_invalid_transition_raises(self):
+        from src.models.state import NodeStateMachine, NodeState
+        sm = NodeStateMachine("n_1")
+        with self.assertRaises(ValueError):
+            sm.transition_to(NodeState.CONVERGED)
+
+    def test_generate_mermaid_diagram(self):
+        from src.models.state import NodeStateMachine
+        diagram = NodeStateMachine.generate_mermaid_diagram()
+        self.assertIn("stateDiagram-v2", diagram)
+        self.assertIn("allocated --> booting", diagram)
+        self.assertIn("converged --> [*]", diagram)
+
 
 if __name__ == "__main__":
     unittest.main()
+

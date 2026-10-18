@@ -1,6 +1,6 @@
 # PNetGimini & EVE IaC Architectural Integration Specification
 
-**Document Version**: 1.2.0 (Technical Review Alignment with Alain Degreffe)  
+**Document Version**: 1.3.0 (Architecture Review & P0 Resolution)  
 **Status**: Approved Architecture Design Document (ADD)  
 **Target Milestone**: PNetGimini v3.1 – v4.0 (v3.1–v3.3 DELIVERED, v3.5–v4.0 PLANNED)  
 **Classification**: Technical Design Specification & Protocol Contract  
@@ -54,6 +54,41 @@ flowchart TD
 3. **EVE-NG**: The bare-metal virtualization runtime (KVM/QEMU, IOL, Dynamips, Docker, Linux bridges).
 4. **PNetGimini**: The specialized operational operator. It owns in-guest CLI lifecycle, multi-vendor syntax translation (Cisco IOS, Huawei VRP, Arista EOS, Juniper Junos), pre-flight snapshot capturing, structured TextFSM telemetry assertions, and intra-node diff-based precision rollback.
 
+### 1.3 Node Lifecycle State Machine
+
+To eliminate race conditions between boot probes, out-of-band proxy readiness, and in-guest automation, virtualized lab nodes adhere to a strictly defined lifecycle state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> allocated
+    allocated --> booting
+    booting --> console_ready
+    booting --> escalated_tier2
+    console_ready --> escalated_tier2
+    console_ready --> oob_ready
+    oob_ready --> configurable
+    oob_ready --> escalated_tier2
+    configurable --> failed_rollback
+    configurable --> verified
+    verified --> converged
+    verified --> failed_rollback
+    failed_rollback --> escalated_tier2
+    failed_rollback --> verified
+    escalated_tier2 --> booting
+    converged --> [*]
+```
+
+* **State Definitions**:
+  * `allocated`: Node resource declared in `topology.yml`; VM not yet instantiated.
+  * `booting`: Hypervisor has powered on the VM; kernel and bootloader are loading.
+  * `console_ready`: Guest console emits a recognizable initial shell or loader banner (`wait_console` event probe target).
+  * `oob_ready`: `eve-iac oob start` has prepared `ssh_config` and Netmiko `terminal_server` session is active.
+  * `configurable`: `AsyncDeploymentEngine` has dispatched Day-1/Day-2 configuration commands.
+  * `verified`: All declarative health gate assertions (OSPF, BGP, Ping SLA) have passed.
+  * `converged`: Digital twin chaos and FRR convergence tests have verified path restoration.
+  * `failed_rollback`: In-guest syntax error or health gate violation; `ConfigDiffEngine` has applied a surgical reversal diff.
+  * `escalated_tier2`: Unrecoverable CLI deadlock or Tier-1 failure exhaustion; node escalated to hypervisor stop/wipe/start.
+
 ---
 
 ## 2. The Two-Plane Operational Model
@@ -65,7 +100,7 @@ The collaboration between EVE IaC and PNetGimini functions as a **two-plane syne
 |                        INFRASTRUCTURE CONTROL PLANE (EVE IaC)                     |
 |                                                                                   |
 |  • Virtual Machine & Container Lifecycle (Deploy, Start, Stop, Destroy)           |
-|  • Out-of-Band Console Access (Host, TCP Port, Protocol Mapping)                  |
+|  • Out-of-Band SSH Console Overlay (eve-iac oob start & inventory generate)       |
 |  • Console Prompt Readiness Synchronization (Go Regex wait_console Probe)         |
 |  • Link State Manipulation (Hardware Cable Cut / Link Flap: set_link_suspend)     |
 |  • Link Quality Degradation (Delay, Jitter, Packet Loss: apply_link_quality)      |
@@ -77,8 +112,8 @@ The collaboration between EVE IaC and PNetGimini functions as a **two-plane syne
 +-----------------------------------------------------------------------------------+
 |                     OPERATIONAL & VERIFICATION ENGINE (PNetGimini)                |
 |                                                                                   |
-|  • High-Concurrency Asyncio Coroutine Engine (AsyncDeploymentEngine)              |
-|  • Multi-Vendor Driver Ingestion & Command Pagination (Adapters Factory)          |
+|  • High-Concurrency Asyncio Coroutine Engine (asyncio.to_thread worker offload)   |
+|  • Deterministic Driver Binding (automation_profile template metadata)            |
 |  • Day-0 Console Bootstrap to Day-1/Day-2 In-Band High-Speed Transition           |
 |  • Structured Telemetry & Convergence Gate (TextFSM, OSPF, BGP, Ping SLA)         |
 |  • Sub-Second CLI Diff-Based Rollback Engine (ConfigDiffEngine)                   |
@@ -112,7 +147,7 @@ from eveiac.oob.inventory import render_project
 inventory_output = render_project(sample_dir="./IaC/sample", target="netmiko")
 ```
 > [!NOTE]
-> `inventory generate` reads `topology.yml` and the exporter catalogue. It does not start nodes and does not call the agent. If `oob start` has not written `ssh_config`, generation fails deterministically with `oob_not_prepared`.
+> **Project Directory vs. Logical Lab ID**: In the CLI commands above, `./IaC/sample` specifies the local IaC project workspace directory containing `topology.yml`. This is distinct from the runtime logical lab identifier (`lab="spine-leaf"`) supplied to SDK/REST endpoints. `inventory generate` reads `topology.yml` and the exporter catalogue locally without mutating runtime state. If `oob start` has not written `ssh_config`, generation fails deterministically with `oob_not_prepared`.
 
 #### 2. Inventory Wire Schema & Connection Model
 * **Host Key**: The OOB alias, ordered strictly by stable IaC node key (`n_1`, `n_2`, `n_10`).
@@ -203,6 +238,10 @@ When out-of-band SSH is unavailable or during deep hypervisor diagnostics, PNetG
      ```
    * **Semantics**: Injects kernel Netem impairments. Metrics (`delay`, `jitter`, `loss`, `bandwidth`) are strictly **integers** (`loss` is integer percentage, e.g. `2`). The `save` flag specifies persistence: omitted or `False` applies live NETEM only without mutating UNL; `save=True` persists into UNL when the session is admin and the lab is unlocked. Neither path rewrites `topology.yml`.
 
+3. **Chaos Restoration Guarantees & Impairment Sweeps**:
+   * **Context Manager Guard**: To ensure that virtual links are never left suspended or degraded if a test process is terminated or an active probe raises an exception, PNetGimini wraps all fault injections inside an explicit context manager (`link_fault_context` / `try ... finally`).
+   * **Startup Clean Sweep**: At orchestrator initialization, `ChaosOrchestrator.reset_all_lab_impairments(lab_id)` queries active links and automatically resets any residual suspended or degraded interfaces to an unencumbered golden state.
+
 ---
 
 ## 4. Declarative Intent Specification (YAML Contract)
@@ -276,12 +315,15 @@ Spine-01:
   chaos_tests:
     - name: "Spine-Leaf Uplink Failover Verification"
       action: link_suspend
-      target_link: "Spine-01:e0/1 <-> Leaf-01:e0/1"
+      target_link: "Spine-01:e0/1 <-> Leaf-01:e0/1" # Human-readable label; resolved to stable IaC key (e.g. n_1:e0/1)
       duration_seconds: 15
       assertions:
         max_failover_loss_packets: 1       # Fast Reroute (FRR) allowed max drop
         max_convergence_time_ms: 1500      # Topology convergence deadline
 ```
+
+> [!NOTE]
+> **Endpoint Identity Resolution (`target_link`)**: In operational intent files, `target_link` supports human-readable endpoint expressions (such as `"Spine-01:e0/1 <-> Leaf-01:e0/1"`). Before invoking EVE IaC APIs, `ChaosOrchestrator.resolve_link_id()` deterministically resolves this expression against `topology.yml` into stable IaC link IDs/keys (`link_12` or `match.endpoints=[{node: "n_1", ...}, {node: "n_2", ...}]`). If an intent references an unresolvable or ambiguous link name, execution halts immediately with a `ValueError` rather than attempting heuristic guessing.
 
 ---
 
@@ -353,13 +395,13 @@ flowchart TD
 
     Snapshot["5. Snapshot Baseline Running Config"]:::pnetStyle
     PushCfg["6. High-Concurrency Asyncio Config Push"]:::pnetStyle
-    Telemetry["7. Fetch Telemetry & Assert Health Gates<br/>(Ping SLA / OSPF Full / BGP Prefixes)"]:::pnetStyle
-    Decision{"Health Gate<br/>Assertions Pass?"}:::pnetStyle
+    Telemetry["7. Fetch Telemetry Commands"]:::pnetStyle
+    Decision{"8. Health Gate<br/>Assertions Pass?"}:::pnetStyle
 
-    Rollback["8a. Tier 1 Surgical Reversal<br/><code>ConfigDiffEngine</code> (<3s)"]:::alertStyle
-    Chaos["8b. Phase B: Chaos Fault Injection<br/><code>POST /api/v1/projects/links/suspend</code>"]:::chaosStyle
-    Probe["9. Synthetic Probe Stream & FRR Convergence Timing"]:::chaosStyle
-    Restore["10. Safe Link Restoration & Audit Artifact Generation"]:::chaosStyle
+    Rollback["9a. Tier 1 Surgical Reversal<br/><code>ConfigDiffEngine</code> (<3s)"]:::alertStyle
+    Chaos["9b. Phase B: Chaos Fault Injection<br/><code>POST /api/v1/projects/links/suspend</code>"]:::chaosStyle
+    Probe["10. Synthetic Probe Stream & FRR Convergence Timing"]:::chaosStyle
+    Restore["11. Safe Link Restoration & Audit Artifact Generation"]:::chaosStyle
 
     Git --> Boot
     Boot --> Discovery
@@ -423,13 +465,13 @@ graph TD
 
 ## 7. Implementation & Traceability Roadmap
 
-> **Document Version Note**: This specification (v1.2.0) covers the PNetGimini v3.1–v4.0 roadmap aligned with Alain Degreffe's technical review. All modules marked DELIVERED are fully implemented, unit-tested, and available in the project repository.
+> **Document Version Note**: This specification (v1.3.0) covers the PNetGimini v3.1–v4.0 roadmap aligned with Alain Degreffe's technical review and P0 contract consistency resolutions. All modules marked DELIVERED are fully implemented, unit-tested, and available in the project repository (verified by 58 passing unit tests).
 
 | Release | Focus Area | EVE IaC API Contract | Architecture Deliverables | Status |
 | :---: | :--- | :--- | :--- | :---: |
-| **v3.1** | **Enterprise Security & Desensitization** | `LoginRequest`, Token Injection | `MaskingFilter` credential redaction, `${VAR:-default}` env expansion, SSH key auth, 25 unit tests | **DELIVERED ✅** |
-| **v3.2** | **Dynamic Topology & Console Discovery** | `list_project_consoles`, `wait_console` | `EveIacConnector` plugin, automatic vendor driver detection, intent binding, 36 unit tests | **DELIVERED ✅** |
-| **v3.3** | **Declarative Health Gate & Chaos Testing** | `set_link_suspend`, `apply_link_quality` | `HealthGateEngine`, `ChaosOrchestrator`, OSPF/BGP/Ping SLA assertions, 52 unit tests | **DELIVERED ✅** |
+| **v3.1** | **Enterprise Security & Desensitization** | `LoginRequest`, Token Injection | `MaskingFilter` credential redaction, `${VAR:-default}` env expansion, SSH key auth | **DELIVERED ✅** |
+| **v3.2** | **OOB Overlay & Topology Discovery** | `oob start`, `inventory generate`, `wait_console` (diagnostic: `list_project_consoles`) | `EveIacConnector` plugin, deterministic `automation_profile` driver mapping, intent binding | **DELIVERED ✅** |
+| **v3.3** | **Declarative Health Gate & Chaos Testing** | `set_link_suspend`, `apply_link_quality` | `HealthGateEngine`, `ChaosOrchestrator` (`link_fault_context` & reset sweeps), OSPF/BGP/Ping assertions | **DELIVERED ✅** |
 | **v3.5** | **Dual-Tier Self-Healing Escalation** | `reconcile_project`, Node Lifecycle | Fallback escalation from CLI diff rollback (Tier 1) to node wipe/reset and lab-wide reconciliation (Tier 2) | **PLANNED ⏳** |
 | **v4.0** | **Complete GitOps Digital Twin Pipeline** | Full REST/SDK OpenAPI Lifecycle | GitHub Actions / GitLab CI standardized workflow templates | **PLANNED ⏳** |
 

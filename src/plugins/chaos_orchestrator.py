@@ -6,6 +6,7 @@ and convergence time assertions via the EVE IaC API.
 
 import time
 import logging
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional, Callable
 
 from src.plugins.eve_iac_connector import EveIacConnector
@@ -36,6 +37,7 @@ class ChaosOrchestrator:
         """
         Resolve a link identifier or endpoint description into a canonical EVE link ID.
         e.g., 'Spine-01:e0/1 <-> Leaf-01:e0/1' or direct 'link_12'.
+        Raises ValueError if a non-empty descriptive link cannot be resolved.
         """
         if not target_link:
             return ""
@@ -46,7 +48,11 @@ class ChaosOrchestrator:
             if l.get("id") == target_link:
                 return target_link
 
-        # Endpoint name match: "Spine-01" and "Leaf-01"
+        # If it's already a canonical link key like link_12 or n_1:e0/1
+        if target_link.startswith("link_"):
+            return target_link
+
+        # Endpoint name match: e.g. "Spine-01" and "Leaf-01"
         target_lower = target_link.lower()
         for l in links:
             src_name = (l.get("src_name") or "").lower()
@@ -54,8 +60,54 @@ class ChaosOrchestrator:
             if src_name and dst_name and src_name in target_lower and dst_name in target_lower:
                 return l.get("id", target_link)
 
-        # Fallback to literal target_link
+        # If it looks like a descriptive link ("<->") but no match was found, raise error
+        if "<->" in target_link or ":" in target_link:
+            raise ValueError(
+                f"Cannot resolve target_link '{target_link}': no matching link found in lab '{lab_id}'."
+            )
+
         return target_link
+
+    @contextmanager
+    def link_fault_context(self, lab_id: str, target_link: str, action: str = "link_suspend"):
+        """
+        Context manager ensuring physical link impairments are 100% safely restored
+        even if an unhandled exception or crash occurs inside the block.
+        """
+        link_id = self.resolve_link_id(lab_id, target_link)
+        link_suspended = False
+        try:
+            if action in ("link_suspend", "suspend", "flap"):
+                self.connector.set_link_suspend(lab_id, link_id, suspended=True)
+                link_suspended = True
+            yield link_id
+        finally:
+            if link_suspended:
+                self.logger.info(f"[Chaos] Context exit: restoring link '{link_id}' back to active state.")
+                self.connector.set_link_suspend(lab_id, link_id, suspended=False)
+            elif action in ("apply_quality", "quality", "degrade"):
+                self.logger.info(f"[Chaos] Context exit: resetting quality impairments on link '{link_id}'.")
+                self.connector.apply_link_quality(lab_id, link_id, delay_ms=0, jitter_ms=0, loss_pct=0.0)
+
+    def reset_all_lab_impairments(self, lab_id: str) -> int:
+        """
+        Startup sweep: resets any lingering suspended or degraded links in the lab.
+        Ensures a clean slate before test execution.
+        """
+        cleaned = 0
+        try:
+            links = self.connector.list_links(lab_id)
+            for link in links:
+                lid = link.get("id")
+                if not lid:
+                    continue
+                self.connector.set_link_suspend(lab_id, lid, suspended=False)
+                self.connector.apply_link_quality(lab_id, lid, delay_ms=0, jitter_ms=0, loss_pct=0.0)
+                cleaned += 1
+            self.logger.info(f"[Chaos] Reset {cleaned} link impairments for lab '{lab_id}'.")
+        except Exception as e:
+            self.logger.warning(f"[Chaos] Impairment reset failed for lab '{lab_id}': {e}")
+        return cleaned
 
     def run_chaos_test(
         self,

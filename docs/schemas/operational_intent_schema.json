@@ -1,0 +1,685 @@
+{
+  "$defs": {
+    "BgpAssertion": {
+      "description": "Declarative BGP peering session assertion.",
+      "properties": {
+        "peer_ip": {
+          "description": "BGP neighbor IP address",
+          "title": "Peer Ip",
+          "type": "string"
+        },
+        "expected_state": {
+          "default": "Established",
+          "description": "Target BGP peering state",
+          "enum": [
+            "Established",
+            "Active",
+            "Connect",
+            "Idle",
+            "OpenSent",
+            "OpenConfirm"
+          ],
+          "title": "Expected State",
+          "type": "string"
+        },
+        "min_prefixes_received": {
+          "default": 0,
+          "description": "Minimum accepted prefix floor to prevent blackholing",
+          "minimum": 0,
+          "title": "Min Prefixes Received",
+          "type": "integer"
+        },
+        "polling_interval_seconds": {
+          "default": 2.0,
+          "description": "Retry interval while waiting for convergence",
+          "maximum": 30.0,
+          "minimum": 0.5,
+          "title": "Polling Interval Seconds",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 60.0,
+          "description": "Maximum wait time before declaring peering timeout",
+          "maximum": 600.0,
+          "minimum": 1.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "peer_ip"
+      ],
+      "title": "BgpAssertion",
+      "type": "object"
+    },
+    "ChaosAssertion": {
+      "description": "Performance deadlines during digital twin chaos injection.",
+      "properties": {
+        "max_failover_loss_packets": {
+          "default": 1,
+          "description": "Maximum allowed packet loss during failover",
+          "minimum": 0,
+          "title": "Max Failover Loss Packets",
+          "type": "integer"
+        },
+        "max_convergence_time_ms": {
+          "default": 1500,
+          "description": "Maximum allowed convergence latency in ms",
+          "maximum": 60000,
+          "minimum": 10,
+          "title": "Max Convergence Time Ms",
+          "type": "integer"
+        }
+      },
+      "title": "ChaosAssertion",
+      "type": "object"
+    },
+    "ChaosTestSpec": {
+      "description": "Digital twin environmental chaos experiment specification.",
+      "properties": {
+        "name": {
+          "description": "Descriptive identifier of the chaos test",
+          "title": "Name",
+          "type": "string"
+        },
+        "action": {
+          "default": "link_suspend",
+          "description": "EVE IaC environmental primitive to inject",
+          "enum": [
+            "link_suspend",
+            "suspend",
+            "flap",
+            "apply_quality",
+            "quality",
+            "degrade"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "target_link": {
+          "description": "Target link expression, e.g. 'Spine-01:e0/1 <-> Leaf-01:e0/1' or canonical 'link_12'",
+          "title": "Target Link",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "default": 10.0,
+          "description": "Duration of physical outage",
+          "maximum": 3600.0,
+          "minimum": 0.1,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "delay_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Injected Netem latency delay in ms",
+          "title": "Delay Ms"
+        },
+        "jitter_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Injected Netem jitter in ms",
+          "title": "Jitter Ms"
+        },
+        "loss_pct": {
+          "anyOf": [
+            {
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Injected Netem packet loss percentage",
+          "title": "Loss Pct"
+        },
+        "assertions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChaosAssertion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Failover convergence criteria"
+        }
+      },
+      "required": [
+        "name",
+        "target_link"
+      ],
+      "title": "ChaosTestSpec",
+      "type": "object"
+    },
+    "DeviceOperationalIntent": {
+      "description": "Operational Day-1/Day-2 intent for a single device node.",
+      "properties": {
+        "config": {
+          "description": "Day-1 / Day-2 configuration CLI command sequence",
+          "items": {
+            "type": "string"
+          },
+          "title": "Config",
+          "type": "array"
+        },
+        "show": {
+          "description": "Operational telemetry snapshot retrieval commands",
+          "items": {
+            "type": "string"
+          },
+          "title": "Show",
+          "type": "array"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthGateVerify"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Declarative health gate assertions or classic string verify commands",
+          "title": "Verify"
+        },
+        "chaos_tests": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ChaosTestSpec"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Environmental chaos experiments linked to this device path",
+          "title": "Chaos Tests"
+        }
+      },
+      "title": "DeviceOperationalIntent",
+      "type": "object"
+    },
+    "HealthGateVerify": {
+      "description": "Structured collection of declarative telemetry assertions.",
+      "properties": {
+        "ping": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PingAssertion"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ICMP ping SLA assertions",
+          "title": "Ping"
+        },
+        "ospf": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/OspfAssertion"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "OSPF adjacency & metric assertions",
+          "title": "Ospf"
+        },
+        "bgp": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BgpAssertion"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "BGP session & prefix floor assertions",
+          "title": "Bgp"
+        },
+        "interfaces": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/InterfaceAssertion"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Interface operational state assertions",
+          "title": "Interfaces"
+        },
+        "routes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RouteAssertion"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "FIB route & next-hop assertions",
+          "title": "Routes"
+        }
+      },
+      "title": "HealthGateVerify",
+      "type": "object"
+    },
+    "IntentMetadata": {
+      "description": "Metadata describing the intent manifest.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deployment manifest name",
+          "title": "Name"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Author or Git committer",
+          "title": "Author"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Operational purpose of the deployment",
+          "title": "Description"
+        }
+      },
+      "title": "IntentMetadata",
+      "type": "object"
+    },
+    "InterfaceAssertion": {
+      "description": "Declarative interface health assertion.",
+      "properties": {
+        "name": {
+          "description": "Canonical interface name (e.g. GigabitEthernet0/1)",
+          "title": "Name",
+          "type": "string"
+        },
+        "admin_status": {
+          "default": "up",
+          "description": "Expected administrative status",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "title": "Admin Status",
+          "type": "string"
+        },
+        "line_protocol": {
+          "default": "up",
+          "description": "Expected line protocol status",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "title": "Line Protocol",
+          "type": "string"
+        },
+        "max_crc_errors_delta": {
+          "default": 0,
+          "description": "Maximum permitted increment in interface CRC errors",
+          "minimum": 0,
+          "title": "Max Crc Errors Delta",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "InterfaceAssertion",
+      "type": "object"
+    },
+    "OspfAssertion": {
+      "description": "Declarative OSPF convergence and metric assertion.",
+      "properties": {
+        "neighbor_ip": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected neighbor IP address",
+          "title": "Neighbor Ip"
+        },
+        "expected_state": {
+          "default": "FULL",
+          "description": "Target OSPF adjacency state",
+          "enum": [
+            "FULL",
+            "2-WAY",
+            "EXSTART",
+            "EXCHANGE",
+            "INIT",
+            "ATTEMPT",
+            "DOWN"
+          ],
+          "title": "Expected State",
+          "type": "string"
+        },
+        "interface": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Local interface connected to the OSPF neighbor",
+          "title": "Interface"
+        },
+        "min_total_neighbors": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum count of FULL neighbors required on the device",
+          "title": "Min Total Neighbors"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "IP prefix to assert in the routing table (e.g. 10.200.0.0/24)",
+          "title": "Route"
+        },
+        "expected_metric": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected calculated OSPF metric cost for the route",
+          "title": "Expected Metric"
+        },
+        "expected_path_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "O",
+                "O IA",
+                "O E1",
+                "O E2"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected OSPF route type",
+          "title": "Expected Path Type"
+        },
+        "polling_interval_seconds": {
+          "default": 2.0,
+          "description": "Retry interval while waiting for convergence",
+          "maximum": 30.0,
+          "minimum": 0.5,
+          "title": "Polling Interval Seconds",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 30.0,
+          "description": "Maximum wait time before declaring assertion failure",
+          "maximum": 300.0,
+          "minimum": 1.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "OspfAssertion",
+      "type": "object"
+    },
+    "PingAssertion": {
+      "description": "Declarative ICMP ping probe assertion.",
+      "properties": {
+        "target": {
+          "description": "Destination IP address or hostname to probe",
+          "title": "Target",
+          "type": "string"
+        },
+        "count": {
+          "default": 5,
+          "description": "Number of ICMP packets to transmit",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source interface or IP address (e.g. Loopback0)",
+          "title": "Source"
+        },
+        "max_loss_pct": {
+          "default": 0.0,
+          "description": "Maximum permitted packet loss percentage (0.0 = 100% delivery required)",
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Max Loss Pct",
+          "type": "number"
+        },
+        "max_avg_rtt_ms": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum permitted average round-trip latency in milliseconds",
+          "title": "Max Avg Rtt Ms"
+        },
+        "vrf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "VRF instance name for ping transmission",
+          "title": "Vrf"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "PingAssertion",
+      "type": "object"
+    },
+    "RouteAssertion": {
+      "description": "Declarative routing table FIB assertion.",
+      "properties": {
+        "prefix": {
+          "description": "Destination prefix in CIDR notation (e.g. 10.200.0.0/24)",
+          "title": "Prefix",
+          "type": "string"
+        },
+        "protocol": {
+          "description": "Expected routing protocol origin",
+          "enum": [
+            "ospf",
+            "bgp",
+            "static",
+            "connected",
+            "direct"
+          ],
+          "title": "Protocol",
+          "type": "string"
+        },
+        "expected_next_hop": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Expected next-hop forwarding gateway IP",
+          "title": "Expected Next Hop"
+        }
+      },
+      "required": [
+        "prefix",
+        "protocol"
+      ],
+      "title": "RouteAssertion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Standardized, version-controlled top-level Operational Intent manifest.\nAdheres to Kubernetes-style apiVersion / kind schema conventions.",
+  "properties": {
+    "apiVersion": {
+      "const": "pnetgimini/v1alpha1",
+      "default": "pnetgimini/v1alpha1",
+      "description": "Schema specification version",
+      "title": "Apiversion",
+      "type": "string"
+    },
+    "kind": {
+      "const": "OperationalIntent",
+      "default": "OperationalIntent",
+      "description": "Resource kind",
+      "title": "Kind",
+      "type": "string"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IntentMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Manifest metadata"
+    },
+    "devices": {
+      "additionalProperties": {
+        "$ref": "#/$defs/DeviceOperationalIntent"
+      },
+      "description": "Mapping of device hostnames / keys to operational intents",
+      "title": "Devices",
+      "type": "object"
+    }
+  },
+  "title": "OperationalIntentDocument",
+  "type": "object"
+}

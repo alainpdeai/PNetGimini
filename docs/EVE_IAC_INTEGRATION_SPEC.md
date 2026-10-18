@@ -250,77 +250,91 @@ The operational intent file format decouples Day-1/Day-2 configuration from dyna
 
 ```yaml
 # ==============================================================================
-# PNetGimini Declarative Operational Intent Schema (v3.3 Specification)
+# PNetGimini Declarative Operational Intent Schema (v3.3 / v1alpha1 Specification)
+# Formal JSON Schema: docs/schemas/operational_intent_schema.json
 # ==============================================================================
-Spine-01:
-  # ----------------------------------------------------------------------------
-  # 1. Day-1 Configuration Commands
-  # ----------------------------------------------------------------------------
-  config:
-    - hostname Spine-01
-    - interface GigabitEthernet0/1
-    - ip address 10.1.1.1 255.255.255.252
-    - ip ospf 100 area 0
-    - ip ospf cost 20
+apiVersion: pnetgimini/v1alpha1
+kind: OperationalIntent
+metadata:
+  name: dc-spine-leaf-baseline
+  author: NetDevOps
+devices:
+  Spine-01:
+    # ----------------------------------------------------------------------------
+    # 1. Day-1 Configuration Commands
+    # ----------------------------------------------------------------------------
+    config:
+      - hostname Spine-01
+      - interface GigabitEthernet0/1
+      - ip address 10.1.1.1 255.255.255.252
+      - ip ospf 100 area 0
+      - ip ospf cost 20
 
-  # ----------------------------------------------------------------------------
-  # 2. Operational Telemetry Commands (Raw Snapshot Retrieval)
-  # ----------------------------------------------------------------------------
-  show:
-    - show ip interface brief
-    - show ip ospf neighbor
-    - show ip route ospf
-    - show ip bgp summary
+    # ----------------------------------------------------------------------------
+    # 2. Operational Telemetry Commands (Raw Snapshot Retrieval)
+    # ----------------------------------------------------------------------------
+    show:
+      - show ip interface brief
+      - show ip ospf neighbor
+      - show ip route ospf
+      - show ip bgp summary
 
-  # ----------------------------------------------------------------------------
-  # 3. Declarative Health Gate Assertions (In-Guest Operational Verification)
-  # ----------------------------------------------------------------------------
-  verify:
-    ping:
-      - target: 10.1.1.2
-        count: 5
-        source: Loopback0
-        max_loss_pct: 0          # Must achieve 100% packet delivery
-        max_avg_rtt_ms: 20       # Average latency must not exceed 20ms
-        vrf: default
+    # ----------------------------------------------------------------------------
+    # 3. Declarative Health Gate Assertions (In-Guest Operational Verification)
+    # ----------------------------------------------------------------------------
+    verify:
+      ping:
+        - target: 10.1.1.2
+          count: 5
+          source: Loopback0
+          max_loss_pct: 0          # Must achieve 100% packet delivery
+          max_avg_rtt_ms: 20       # Average latency must not exceed 20ms
+          vrf: default
 
-    ospf:
-      - neighbor_ip: 10.1.1.2
-        expected_state: FULL     # Neighbor must reach FULL adjacency
-        interface: GigabitEthernet0/1
-      - min_total_neighbors: 2   # Node must maintain at least 2 active neighbors
-      - route: 10.200.0.0/24
-        expected_metric: 20      # Assert calculated OSPF metric matches policy
-        expected_path_type: E2   # One of: O, O IA, O E1, O E2
+      ospf:
+        - neighbor_ip: 10.1.1.2
+          expected_state: FULL     # Neighbor must reach FULL adjacency
+          interface: GigabitEthernet0/1
+        - min_total_neighbors: 2   # Node must maintain at least 2 active neighbors
+        - route: 10.200.0.0/24
+          expected_metric: 20      # Assert calculated OSPF metric matches policy
+          expected_path_type: E2   # One of: O, O IA, O E1, O E2
+          polling_interval_seconds: 2.0
+          timeout_seconds: 30.0
 
-    bgp:
-      - peer_ip: 192.168.100.2
-        expected_state: Established
-        min_prefixes_received: 10 # Prevents blackholing caused by route-map misconfig
+      bgp:
+        - peer_ip: 192.168.100.2
+          expected_state: Established
+          min_prefixes_received: 10 # Prevents blackholing caused by route-map misconfig
+          polling_interval_seconds: 2.0
+          timeout_seconds: 60.0
 
-    interfaces:
-      - name: GigabitEthernet0/1
-        admin_status: up
-        line_protocol: up
-        max_crc_errors_delta: 0  # Zero increment in CRC errors allowed
+      interfaces:
+        - name: GigabitEthernet0/1
+          admin_status: up
+          line_protocol: up
+          max_crc_errors_delta: 0  # Zero increment in CRC errors allowed
 
-    routes:
-      - prefix: 10.200.0.0/24
-        protocol: ospf
-        expected_next_hop: 10.1.1.2
+      routes:
+        - prefix: 10.200.0.0/24
+          protocol: ospf
+          expected_next_hop: 10.1.1.2
 
-  # ----------------------------------------------------------------------------
-  # 4. Digital Twin Chaos Convergence Assertions (EVE IaC Environmental Linkage)
-  # ----------------------------------------------------------------------------
-  chaos_tests:
-    - name: "Spine-Leaf Uplink Failover Verification"
-      action: link_suspend
-      target_link: "Spine-01:e0/1 <-> Leaf-01:e0/1" # Human-readable label; resolved to stable IaC key (e.g. n_1:e0/1)
-      duration_seconds: 15
-      assertions:
-        max_failover_loss_packets: 1       # Fast Reroute (FRR) allowed max drop
-        max_convergence_time_ms: 1500      # Topology convergence deadline
+    # ----------------------------------------------------------------------------
+    # 4. Digital Twin Chaos Convergence Assertions (EVE IaC Environmental Linkage)
+    # ----------------------------------------------------------------------------
+    chaos_tests:
+      - name: "Spine-Leaf Uplink Failover Verification"
+        action: link_suspend
+        target_link: "Spine-01:e0/1 <-> Leaf-01:e0/1" # Human-readable label; resolved to stable IaC key (e.g. n_1:e0/1)
+        duration_seconds: 15
+        assertions:
+          max_failover_loss_packets: 1       # Fast Reroute (FRR) allowed max drop
+          max_convergence_time_ms: 1500      # Topology convergence deadline
 ```
+
+> [!NOTE]
+> **Single Source of Truth & Formal JSON Schema**: The operational intent structure is formally modeled in Python via Pydantic (`src/models/intent.py`) and exported to [`docs/schemas/operational_intent_schema.json`](file:///D:/OneDrive/2025/Alain/pythonprogram/PnetGimini/docs/schemas/operational_intent_schema.json). Tooling, IDE linters, and CI/CD validation pipelines validate user manifests directly against the generated schema. Legacy top-level device dictionaries remain fully backward compatible.
 
 > [!NOTE]
 > **Endpoint Identity Resolution (`target_link`)**: In operational intent files, `target_link` supports human-readable endpoint expressions (such as `"Spine-01:e0/1 <-> Leaf-01:e0/1"`). Before invoking EVE IaC APIs, `ChaosOrchestrator.resolve_link_id()` deterministically resolves this expression against `topology.yml` into stable IaC link IDs/keys (`link_12` or `match.endpoints=[{node: "n_1", ...}, {node: "n_2", ...}]`). If an intent references an unresolvable or ambiguous link name, execution halts immediately with a `ValueError` rather than attempting heuristic guessing.

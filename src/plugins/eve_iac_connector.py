@@ -231,6 +231,145 @@ class EveIacConnector:
             logging.warning(f"Console wait probe failed for node {node} in lab {lab_id}: {e}")
             return False
 
+    def stop_node(self, lab_id: str, node: str) -> bool:
+        """
+        Stop a virtual machine node in the hypervisor.
+        Maps to EVE IaC node stop lifecycle endpoint.
+        """
+        if self.offline_mode:
+            logging.info(f"[Offline] Successfully stopped node '{node}' in lab '{lab_id}'.")
+            return True
+
+        if self.client and hasattr(self.client, "stop_node"):
+            try:
+                self.client.stop_node(lab=lab_id, node=node)
+                logging.info(f"Node '{node}' stopped via EVE IaC SDK.")
+                return True
+            except Exception as e:
+                logging.warning(f"SDK stop_node failed ({e}); falling back to REST.")
+
+        url = f"{self.url}/api/v1/projects/{lab_id}/nodes/{node}/stop"
+        headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        req = urllib.request.Request(url, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status in (200, 204)
+        except Exception as e:
+            logging.error(f"Failed to stop node '{node}' in lab '{lab_id}': {e}")
+            return False
+
+    def wipe_node(self, lab_id: str, node: str) -> bool:
+        """
+        Wipe a node's ephemeral disk / nvram back to golden baseline startup config.
+        Maps to EVE IaC node wipe lifecycle endpoint.
+        """
+        if self.offline_mode:
+            logging.info(f"[Offline] Successfully wiped node '{node}' in lab '{lab_id}'.")
+            return True
+
+        if self.client and hasattr(self.client, "wipe_node"):
+            try:
+                self.client.wipe_node(lab=lab_id, node=node)
+                logging.info(f"Node '{node}' wiped via EVE IaC SDK.")
+                return True
+            except Exception as e:
+                logging.warning(f"SDK wipe_node failed ({e}); falling back to REST.")
+
+        url = f"{self.url}/api/v1/projects/{lab_id}/nodes/{node}/wipe"
+        headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        req = urllib.request.Request(url, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status in (200, 204)
+        except Exception as e:
+            logging.error(f"Failed to wipe node '{node}' in lab '{lab_id}': {e}")
+            return False
+
+    def start_node(self, lab_id: str, node: str) -> bool:
+        """
+        Power on / start a virtual machine node in the hypervisor.
+        Maps to EVE IaC node start lifecycle endpoint.
+        """
+        if self.offline_mode:
+            logging.info(f"[Offline] Successfully started node '{node}' in lab '{lab_id}'.")
+            return True
+
+        if self.client and hasattr(self.client, "start_node"):
+            try:
+                self.client.start_node(lab=lab_id, node=node)
+                logging.info(f"Node '{node}' started via EVE IaC SDK.")
+                return True
+            except Exception as e:
+                logging.warning(f"SDK start_node failed ({e}); falling back to REST.")
+
+        url = f"{self.url}/api/v1/projects/{lab_id}/nodes/{node}/start"
+        headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        req = urllib.request.Request(url, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status in (200, 204)
+        except Exception as e:
+            logging.error(f"Failed to start node '{node}' in lab '{lab_id}': {e}")
+            return False
+
+    def reset_node_lifecycle(self, lab_id: str, node: str) -> bool:
+        """
+        Execute full lifecycle wipe and reset sequence: stop -> wipe -> start.
+        Restores clean golden state for unrecoverable guest CLI deadlocks.
+        """
+        logging.warning(f"Executing Tier-2 node lifecycle reset (stop -> wipe -> start) on '{node}'...")
+        if not self.stop_node(lab_id, node):
+            logging.error(f"Failed to stop node '{node}' during lifecycle reset.")
+            return False
+        if not self.wipe_node(lab_id, node):
+            logging.error(f"Failed to wipe node '{node}' during lifecycle reset.")
+            return False
+        if not self.start_node(lab_id, node):
+            logging.error(f"Failed to start node '{node}' during lifecycle reset.")
+            return False
+        logging.info(f"Tier-2 lifecycle reset sequence successfully executed for node '{node}'.")
+        return True
+
+    def reconcile_lab(self, lab_id: str, direction: str = "to_eve", confirm: bool = True) -> Dict[str, Any]:
+        """
+        Reconcile lab-wide desired state against topology.yml.
+        Maps to EVE IaC `reconcile_project(direction='to_eve', confirm=True)`.
+        """
+        if self.offline_mode:
+            logging.info(f"[Offline] Lab-wide reconciliation applied to lab '{lab_id}' (direction={direction}, confirm={confirm}).")
+            return {"status": "RECONCILED", "lab_id": lab_id, "direction": direction, "confirmed": confirm}
+
+        if self.client and hasattr(self.client, "reconcile_project"):
+            try:
+                res = self.client.reconcile_project(lab=lab_id, direction=direction, confirm=confirm)
+                return {"status": "RECONCILED", "result": res}
+            except Exception as e:
+                logging.warning(f"SDK reconcile_project failed ({e}); falling back to REST.")
+
+        url = f"{self.url}/api/v1/projects/{lab_id}/reconcile"
+        payload = json.dumps({"direction": direction, "confirm": confirm}).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data
+        except Exception as e:
+            logging.error(f"Lab-wide reconciliation failed for lab '{lab_id}': {e}")
+            raise RuntimeError(f"Lab Reconciliation Failed: {e}")
+
     def list_links(self, lab_id: str) -> List[Dict[str, Any]]:
         """
         List all virtual and physical topology links for a given project.

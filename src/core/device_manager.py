@@ -5,7 +5,7 @@ from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 import datetime
 import re
-from typing import List
+from typing import List, Optional, Any, Dict
 
 from ..models.device import Device
 from .adapters.factory import AdapterFactory
@@ -23,12 +23,20 @@ class DeviceManager:
     Manages device connections, command deployment, and intelligent diff-based recovery.
     Supports multi-vendor abstraction (Cisco, Huawei) and structured snapshot lifecycle management.
     """
-    def __init__(self, device: Device, outputs_dir: Path):
+    def __init__(
+        self,
+        device: Device,
+        outputs_dir: Path,
+        prefer_native_rollback: bool = False,
+        self_healing_engine: Optional[Any] = None
+    ):
         self.device = device
         self.logger = logging.getLogger(__name__)
         self.outputs_dir = outputs_dir
         self.snapshots_dir = self.outputs_dir / "snapshots"
         self.adapter = AdapterFactory.get_adapter(self.device.device_type)
+        self.prefer_native_rollback = prefer_native_rollback
+        self.self_healing_engine = self_healing_engine
 
     def _create_connection_info(self) -> dict:
         """
@@ -113,6 +121,21 @@ class DeviceManager:
                 f.write(initial_config)
             result["snapshot_file"] = str(backup_path)
             self.logger.info(f"Pre-change snapshot archived to: {backup_path}")
+
+            # If native rollback is preferred and supported, archive on-device snapshot
+            native_enabled = (
+                self.prefer_native_rollback or getattr(self.device, "prefer_native_rollback", False)
+            )
+            if native_enabled and self.adapter.supports_native_rollback():
+                try:
+                    native_snapshot_name = f"pnet_base_{timestamp}.cfg"
+                    native_snap_cmd = self.adapter.get_native_snapshot_command(native_snapshot_name)
+                    if native_snap_cmd:
+                        self.logger.info(f"Archiving on-device baseline snapshot via: '{native_snap_cmd}'")
+                        net_connect.send_command(native_snap_cmd, read_timeout=90)
+                        result["native_snapshot_name"] = native_snapshot_name
+                except Exception as native_snap_err:
+                    self.logger.warning(f"On-device native snapshot capture failed ({native_snap_err}); relying on local snapshot.")
 
             self.logger.info("--- Device live output started ---")
 
@@ -204,42 +227,89 @@ class DeviceManager:
                         net_connect.send_command(self.adapter.get_disable_paging_command())
                     except Exception as rb_paging_err:
                         self.logger.debug(f"Paging command skipped during rollback: {rb_paging_err}")
-                    
-                    # Compute minimal diff-based reversal patch
-                    reversal_plan = ConfigDiffEngine.compute_reversion_plan(
-                        baseline_raw=initial_config,
-                        deployed_commands=deployed_config_commands,
-                        adapter=self.adapter
-                    )
 
-                    if reversal_plan:
-                        self.logger.warning(f"Applying intelligent DIFF-BASED rollback ({len(reversal_plan)} commands): {reversal_plan}")
-                        rollback_output = net_connect.send_config_set(
-                            reversal_plan,
-                            delay_factor=2,
-                            read_timeout=60,
-                            cmd_verify=False
+                    # 1. Try Native Rollback first if preferred and available
+                    native_applied = False
+                    if result.get("native_snapshot_name") and self.adapter.supports_native_rollback():
+                        try:
+                            rb_cmd = self.adapter.get_native_rollback_command(result["native_snapshot_name"])
+                            if rb_cmd:
+                                self.logger.warning(f"Applying NATIVE atomic rollback via: '{rb_cmd}'")
+                                native_out = net_connect.send_command(rb_cmd, read_timeout=120)
+                                self.logger.info(native_out)
+                                if "% Error" not in native_out and "Aborted" not in native_out:
+                                    result["rollback_applied"] = True
+                                    result["rollback_type"] = "NATIVE_REPLACE"
+                                    native_applied = True
+                                    self.logger.info(f"Native atomic rollback completed successfully on {self.device.ip}.")
+                                else:
+                                    self.logger.warning("Native rollback reported errors; falling back to Diff reversal.")
+                        except Exception as native_err:
+                            self.logger.warning(f"Native rollback failed ({native_err}); falling back to Diff reversal.")
+
+                    # 2. Diff Fallback
+                    if not native_applied:
+                        reversal_plan = ConfigDiffEngine.compute_reversion_plan(
+                            baseline_raw=initial_config,
+                            deployed_commands=deployed_config_commands,
+                            adapter=self.adapter
                         )
-                        result["rollback_applied"] = True
-                        result["rollback_type"] = "DIFF_BASED"
-                        self.logger.info(f"Diff-based rollback completed successfully on {self.device.ip}.")
-                    else:
-                        # Fallback to cleaned baseline if no diff could be determined
-                        self.logger.warning(f"No specific diff calculated; falling back to clean baseline restore.")
-                        clean_baseline = ConfigDiffEngine.get_clean_baseline_commands(initial_config, self.adapter)
-                        rollback_output = net_connect.send_config_set(
-                            clean_baseline,
-                            delay_factor=2,
-                            read_timeout=120,
-                            cmd_verify=False
-                        )
-                        result["rollback_applied"] = True
-                        result["rollback_type"] = "CLEAN_BASELINE"
-                        self.logger.info(f"Clean baseline restore completed on {self.device.ip}.")
+                        if reversal_plan:
+                            self.logger.warning(f"Applying intelligent DIFF-BASED rollback ({len(reversal_plan)} commands): {reversal_plan}")
+                            rollback_output = net_connect.send_config_set(
+                                reversal_plan,
+                                delay_factor=2,
+                                read_timeout=60,
+                                cmd_verify=False
+                            )
+                            result["rollback_applied"] = True
+                            result["rollback_type"] = "DIFF_BASED"
+                            self.logger.info(f"Diff-based rollback completed successfully on {self.device.ip}.")
+                        else:
+                            self.logger.warning("No specific diff calculated; falling back to clean baseline restore.")
+                            clean_baseline = ConfigDiffEngine.get_clean_baseline_commands(initial_config, self.adapter)
+                            rollback_output = net_connect.send_config_set(
+                                clean_baseline,
+                                delay_factor=2,
+                                read_timeout=120,
+                                cmd_verify=False
+                            )
+                            result["rollback_applied"] = True
+                            result["rollback_type"] = "CLEAN_BASELINE"
+                            self.logger.info(f"Clean baseline restore completed on {self.device.ip}.")
 
                 except Exception as rollback_e:
-                    self.logger.critical(f"Rollback execution failed on {self.device.ip}: {rollback_e}", exc_info=True)
+                    self.logger.critical(f"Tier-1 rollback execution failed on {self.device.ip}: {rollback_e}", exc_info=True)
                     result["error_message"] += f" | Rollback also failed: {rollback_e}"
+                    result["tier1_exhausted"] = True
+
+                    # 3. Escalate to Tier 2 if SelfHealingEngine is configured
+                    if self.self_healing_engine and getattr(self.device, "lab_id", None):
+                        try:
+                            node_key = getattr(self.device, "node_id", self.device.name)
+                            heal_result = self.self_healing_engine.heal_node(
+                                lab_id=self.device.lab_id,
+                                node_key=node_key,
+                                reason=f"Tier-1 rollback failure: {rollback_e}"
+                            )
+                            result["tier2_healing"] = heal_result
+                        except Exception as heal_err:
+                            self.logger.critical(f"Tier-2 self-healing escalation also failed: {heal_err}")
+                            result["error_message"] += f" | Tier-2 escalation failed: {heal_err}"
+            else:
+                result["tier1_exhausted"] = True
+                if self.self_healing_engine and getattr(self.device, "lab_id", None):
+                    try:
+                        node_key = getattr(self.device, "node_id", self.device.name)
+                        heal_result = self.self_healing_engine.heal_node(
+                            lab_id=self.device.lab_id,
+                            node_key=node_key,
+                            reason=f"Connection/Auth failure: {e}"
+                        )
+                        result["tier2_healing"] = heal_result
+                    except Exception as heal_err:
+                        self.logger.critical(f"Tier-2 self-healing escalation failed: {heal_err}")
+                        result["error_message"] += f" | Tier-2 escalation failed: {heal_err}"
         
         finally:
             if net_connect:

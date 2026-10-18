@@ -129,3 +129,17 @@ class CiscoAdapter(BaseAdapter):
 
         reversal_cmds.append(self.get_block_exit_command())
         return reversal_cmds
+
+    def supports_native_rollback(self) -> bool:
+        """Cisco IOS and IOS-XE support atomic configure replace from stored snapshot."""
+        return True
+
+    def get_native_snapshot_command(self, filename: str) -> Optional[str]:
+        """Archive running configuration to flash storage."""
+        clean_name = filename.strip().replace(" ", "_")
+        return f"copy running-config flash:{clean_name}"
+
+    def get_native_rollback_command(self, filename: str) -> Optional[str]:
+        """Atomically replace running configuration from flash snapshot."""
+        clean_name = filename.strip().replace(" ", "_")
+        return f"configure replace flash:{clean_name} force"

@@ -51,3 +51,15 @@ class BaseAdapter(abc.ABC):
         If baseline_children exists, restores modified attributes.
         """
         pass
+
+    def supports_native_rollback(self) -> bool:
+        """Indicates whether this vendor OS supports native atomic configuration replacement."""
+        return False
+
+    def get_native_snapshot_command(self, filename: str) -> Optional[str]:
+        """Command to archive baseline running-config onto device local storage."""
+        return None
+
+    def get_native_rollback_command(self, filename: str) -> Optional[str]:
+        """Command to atomically replace running-config with the archived snapshot."""
+        return None

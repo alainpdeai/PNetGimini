@@ -117,3 +117,7 @@ class HuaweiAdapter(BaseAdapter):
 
         reversal_cmds.append(self.get_block_exit_command())
         return reversal_cmds
+
+    def supports_native_rollback(self) -> bool:
+        """Traditional Huawei VRP 5/8 relies on surgical Diff-based reversal."""
+        return False

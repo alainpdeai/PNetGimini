@@ -4,6 +4,37 @@ All notable changes to the PNetGimini project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-10-18
+
+### Overview
+This release implements Task 1 (v3.5 Dual-Tier Self-Healing Escalation Engine) and Task 2 ("Native First, Diff Fallback" Rollback Plugin), closing the disaster recovery and atomic transaction gap.
+
+### Added
+- **Dual-Tier Self-Healing Escalation Engine (`src/core/self_healing.py`)**:
+  - `SelfHealingEngine`: Coordinates automated escalation from failed in-guest CLI operations (Tier 1) to EVE IaC infrastructure lifecycle actions (Tier 2).
+  - Hypervisor lifecycle reset (`reset_node_lifecycle`): Executes `stop -> wipe -> start` sequence to return unresponsive nodes back to golden startup-config.
+  - Lab-wide desired state drift reconciliation (`reconcile_topology`): Aligns live hypervisor state against `topology.yml` via EVE IaC `reconcile_project(direction='to_eve', confirm=True)`.
+  - Node state machine transition tracking across `ESCALATED_TIER2 -> BOOTING -> CONSOLE_READY`.
+- **EVE IaC Lifecycle API Support (`src/plugins/eve_iac_connector.py`)**:
+  - Added `stop_node`, `wipe_node`, `start_node`, `reset_node_lifecycle`, and `reconcile_lab` with dual-mode support (SDK and REST OpenAPI fallback).
+- **"Native First, Diff Fallback" Rollback Engine (`src/core/device_manager.py`)**:
+  - Added `prefer_native_rollback` and `self_healing_engine` integration into `DeviceManager`.
+  - On-device baseline snapshot archiving: Captures atomic snapshot (e.g. `flash:pnet_base_<timestamp>.cfg`) prior to command deployment.
+  - Native atomic rollback: Evaluates `configure replace flash:... force` (Cisco IOS/XE). If native rollback reports errors or is unsupported, automatically falls back to `ConfigDiffEngine` (Tier 1 diff reversal).
+  - Tier-1 failure escalation: Automatically triggers `SelfHealingEngine.heal_node()` if both native and diff rollbacks fail.
+- **Vendor Adapter Extensions (`src/core/adapters/base.py`, `cisco.py`, `huawei.py`)**:
+  - Added `supports_native_rollback()`, `get_native_snapshot_command()`, `get_native_rollback_command()`.
+  - Cisco adapter returns `True` with atomic flash replacement; Huawei adapter cleanly defaults to Diff fallback.
+
+### Test Suite Metrics
+- **Total Test Cases**: 77 (expanded from 68)
+- **Passing**: 77 (100% success rate)
+- **Failures / Errors**: 0
+- **Execution Time**: ~0.47s
+- **New Test Modules**:
+  - `tests/test_v35_native_rollback.py`: 4 tests (flag checking, native replace success, error fallback to diff, Huawei default diff)
+  - `tests/test_v35_self_healing.py`: 5 tests (offline lifecycle, node reset with state machine, reset failure handling, topology reconcile, DeviceManager tier-2 escalation)
+
 ---
 
 ## [1.3.0] - 2026-10-18
